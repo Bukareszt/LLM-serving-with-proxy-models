@@ -99,8 +99,8 @@ def extract_first_round_prompt(example):
     # Get first 5 tokens of response and add to prompt
     encoded_response = vicuna_tokenizer(assistant_content, truncation=False)
     response_prefix = ""
-    if len(encoded_response['input_ids']) > 5:
-        response_prefix_ids = encoded_response['input_ids'][:5]
+    if len(encoded_response['input_ids']) > 1:
+        response_prefix_ids = encoded_response['input_ids'][:1]
         response_prefix = vicuna_tokenizer.decode(response_prefix_ids)
     else:
         response_prefix = assistant_content  # Use all if less than 5 tokens
