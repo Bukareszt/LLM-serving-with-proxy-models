@@ -39,8 +39,18 @@ def exact_multi_round_prompt(dataset):
                 if len(encoded_response['input_ids']) <= 1 or len(encoded_response['input_ids']) >= 512:
                     break
 
+                # Get first 5 tokens of response and add to prompt
+                response_prefix = ""
+                if len(encoded_response['input_ids']) > 5:
+                    response_prefix_ids = encoded_response['input_ids'][:5]
+                    response_prefix = vicuna_tokenizer.decode(response_prefix_ids)
+                else:
+                    response_prefix = assistant_content  # Use all if less than 5 tokens
+                
+                prompt_with_prefix = dialogue_so_far + '[ASSISTANT]: ' + response_prefix
+
                 # Add a new prediction sample
-                new_samples['prompt'].append(dialogue_so_far)
+                new_samples['prompt'].append(prompt_with_prefix)
                 new_samples['conversation_id'].append(conversation_id)
                 new_samples['model'].append(sample['model'])
                 new_samples['turn_id'].append(i // 2)
@@ -86,8 +96,18 @@ def extract_first_round_prompt(example):
         else:
             break
 
-    example['prompt'] = user_content
+    # Get first 5 tokens of response and add to prompt
     encoded_response = vicuna_tokenizer(assistant_content, truncation=False)
+    response_prefix = ""
+    if len(encoded_response['input_ids']) > 5:
+        response_prefix_ids = encoded_response['input_ids'][:5]
+        response_prefix = vicuna_tokenizer.decode(response_prefix_ids)
+    else:
+        response_prefix = assistant_content  # Use all if less than 5 tokens
+    
+    # Add response prefix to prompt
+    example['prompt'] = user_content + " " + response_prefix
+    
     example['num_tokens'] = len(encoded_response['input_ids'])
     if task_type == 0:
         example['labels'] = len(encoded_response['input_ids'])
