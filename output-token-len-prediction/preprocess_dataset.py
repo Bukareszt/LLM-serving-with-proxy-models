@@ -248,7 +248,7 @@ if __name__ == '__main__':
     dataset = dataset.select(range(selected_data_size))
     if FLAG_VICUNA_DATA_ONLY:
         dataset = dataset.filter(lambda example: example["model"] == args.model_name)
-    dataset = dataset.shuffle(seed=1)
+    dataset = dataset.shuffle(seed=42)
     dataset = preprocess_dataset(dataset)
 
     percentiles = [[] for _ in range(num_models)]

@@ -14,11 +14,27 @@ from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
 from accelerate import Accelerator
-from torch.utils.tensorboard import SummaryWriter
 import os
 import numpy as np
 from datetime import datetime
 import time
+# Import the Logger class
+from logger import Logger
+import random
+# Import scikit-learn metrics for regression evaluation
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# Set seed for reproducibility
+def set_seed(seed=42):
+    """Set seed for reproducibility in various Python libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(seed)
 
 
 class BertClassificationModel(nn.Module):
@@ -144,7 +160,7 @@ def write_loss_to_file(training_loss_list, validation_loss_list):
         f.write('\n')
 
 
-def train(model, criterion, optimizer, train_dataloader, validation_dataloader, num_epochs, device):
+def train(model, criterion, optimizer, train_dataloader, validation_dataloader, num_epochs, device, logger=None):
     num_training_steps = num_epochs * len(train_dataloader)
     # Using a learning rate with a linear decay
     lr_scheduler = transformers.get_scheduler(
@@ -157,8 +173,6 @@ def train(model, criterion, optimizer, train_dataloader, validation_dataloader, 
 
     training_loss_list = []
     validation_loss_list = []
-    if FLAG_WRITE_RESULTS:
-        writer = SummaryWriter()
 
     for epoch in tqdm(range(num_epochs)):
         training_loss = 0
@@ -194,10 +208,14 @@ def train(model, criterion, optimizer, train_dataloader, validation_dataloader, 
             lr_scheduler.step()
             training_loss += loss.item()
 
-        if FLAG_WRITE_RESULTS:
-            writer.add_scalar("Loss/train", training_loss / len(train_dataloader), epoch)
-        print(f"Training loss for epoch {epoch}: {training_loss / len(train_dataloader)}")
-        training_loss_list.append(training_loss / len(train_dataloader))
+        # Log training loss using the Logger
+        avg_train_loss = training_loss / len(train_dataloader)
+        print(f"Training loss for epoch {epoch}: {avg_train_loss}")
+        training_loss_list.append(avg_train_loss)
+        
+        if logger:
+            logger.log_metrics({"loss": avg_train_loss}, step=epoch, prefix="train")
+        
         if epoch % 1 == 0:
             if TASK_TYPE == 0:
                 validation_metrics = eval_regression(model, validation_dataloader, device)
@@ -210,9 +228,15 @@ def train(model, criterion, optimizer, train_dataloader, validation_dataloader, 
             for k, v in validation_metrics.items():
                 print(f'{k}: {v:.4f}', end='\t')
             print(' ')
+            
+            # Log validation metrics
+            if logger:
+                logger.log_metrics(validation_metrics, step=epoch, prefix="validation")
+                
+            validation_loss_list.append(validation_metrics.get('L1 error', 0))
+    
+    # Save losses to file if needed
     if FLAG_WRITE_RESULTS:
-        writer.flush()
-        writer.close()
         write_loss_to_file(training_loss_list, validation_loss_list)
 
 
@@ -254,29 +278,62 @@ def eval_classification(model, dataloader, device):
 
 
 def eval_regression(model, dataloader, device):
-    l1loss = nn.L1Loss()
-    mseloss = nn.MSELoss()
+    """
+    Evaluate regression model performance using comprehensive metrics.
+    
+    Args:
+        model: The model to evaluate
+        dataloader: DataLoader containing evaluation data
+        device: Device to run evaluation on
+        
+    Returns:
+        Dictionary containing regression metrics (MAE, MSE, RMSE, R2)
+    """
     model.eval()
-
-    l1err = 0
-    mse = 0
+    all_predictions = []
+    all_labels = []
+    
     with torch.no_grad():
         for batch in dataloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            
             if FLAG_VICUNA_DATA_ONLY:
                 prediction = model(input_ids=input_ids, attention_mask=attention_mask)
             else:
                 model_name = batch['model'].to(device)
                 prediction = model(input_ids=input_ids, attention_mask=attention_mask, model_name=model_name)
+                
             if TASK_TYPE == 0:
                 labels = batch['num_tokens'].to(device)
             else:
                 labels = batch['labels'].to(device)
-            l1err += l1loss(prediction, labels.type_as(prediction))
-            mse += mseloss(prediction, labels.type_as(prediction))
-
-    metric = {'L1 error': l1err.item() / len(dataloader), 'MSE': mse.item() / len(dataloader)}
+                
+            # Collect predictions and labels
+            all_predictions.extend(prediction.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    # Convert to numpy arrays
+    all_predictions = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(all_labels, all_predictions)
+    mse = mean_squared_error(all_labels, all_predictions)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(all_labels, all_predictions)
+    
+    # For backward compatibility
+    l1_error = mae
+    
+    metric = {
+        'L1 error': l1_error,  # Keeping the old key for backward compatibility
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse,
+        'R2': r2
+    }
+    
     return metric
 
 
@@ -430,6 +487,9 @@ def get_dataset_path():
 
 
 if __name__ == '__main__':
+    # Set seed for reproducibility
+    set_seed(42)
+    
     dataset_name = 'lmsys/lmsys-chat-1m'
 
     parser = argparse.ArgumentParser()
@@ -517,6 +577,28 @@ if __name__ == '__main__':
         criterion = nn.NLLLoss(weight=torch.tensor(weights).to(device))
     optimizer = torch.optim.AdamW(params=model.parameters(), lr=lr)
 
+    # Initialize logger
+    config = {
+        'task_type': TASK_TYPE,
+        'model_name': model_name,
+        'vicuna_only': FLAG_VICUNA_DATA_ONLY,
+        'first_round_only': FLAG_FIRST_ROUND_ONLY,
+        'bert_tuning': FLAG_BERT_TUNING,
+        'tiny_bert': FLAG_TINY_BERT,
+        'loss_type': 'L1Loss' if FLAG_L1_LOSS else 'MSELoss',
+        'num_epochs': num_epochs,
+        'batch_size': train_batch_size,
+        'learning_rate': lr,
+        'data_size': selected_data_size
+    }
+    
+    # Use model name for the logger to distinguish different runs
+    model_type = "regression" if TASK_TYPE == 0 else "classification"
+    logger = Logger(config=config, 
+                   model_name=f"{model_name.replace('/', '-')}_{model_type}", 
+                   enable_logging=True,
+                   log_model=(FLAG_SAVE_MODEL_WEIGHTS))
+    
     if FLAG_LOAD_MODEL_WEIGHTS:
         model.load_state_dict(torch.load('./models/' + output_filename.split('.')[0] + '.pth'))
         model.to(device)
@@ -530,7 +612,8 @@ if __name__ == '__main__':
             train_dataloader, 
             validation_dataloader, 
             num_epochs, 
-            device)
+            device,
+            logger=logger)
 
     if TASK_TYPE == 0:
         validation_metrics = eval_regression(model, validation_dataloader, device)
@@ -563,6 +646,11 @@ if __name__ == '__main__':
         else:
             validation_metrics = eval_classification(model, test_dataloader, device)
         print(f'Metrics on test set:')
+        
+        # Log test metrics
+        if logger:
+            logger.log_metrics(validation_metrics, prefix="test")
+        
         os.makedirs('./metrics', exist_ok=True)
         with open('./metrics/' + output_filename.split('.')[0] + '.txt', 'a') as f:
             for k, v in validation_metrics.items():
@@ -600,3 +688,7 @@ if __name__ == '__main__':
             plt.xticks(rotation=45)
             fig = ax.get_figure()
             fig.savefig("./results/cls_all_models.pdf")
+
+    # Finish logging
+    if logger:
+        logger.finish()
